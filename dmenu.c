@@ -1,6 +1,7 @@
 /* See LICENSE file for copyright and license details. */
 #include <ctype.h>
 #include <locale.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,9 +22,12 @@
 
 /* macros */
 #define INTERSECT(x,y,w,h,r)  (MAX(0, MIN((x)+(w),(r).x_org+(r).width)  - MAX((x),(r).x_org)) \
-                             * MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
+                             && MAX(0, MIN((y)+(h),(r).y_org+(r).height) - MAX((y),(r).y_org)))
 #define LENGTH(X)             (sizeof X / sizeof X[0])
 #define TEXTW(X)              (drw_fontset_getwidth(drw, (X)) + lrpad)
+
+/* define opaqueness */
+#define OPAQUE 0xFFU
 
 /* enums */
 enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
@@ -32,6 +36,7 @@ struct item {
 	char *text;
 	struct item *left, *right;
 	int out;
+	double distance;
 };
 
 static char text[BUFSIZ] = "";
@@ -51,12 +56,56 @@ static Window root, parentwin, win;
 static XIC xic;
 
 static Drw *drw;
+static int usergb = 0;
+static Visual *visual;
+static int depth;
+static Colormap cmap;
 static Clr *scheme[SchemeLast];
 
 #include "config.h"
 
 static int (*fstrncmp)(const char *, const char *, size_t) = strncmp;
 static char *(*fstrstr)(const char *, const char *) = strstr;
+
+
+static void
+xinitvisual()
+{
+	XVisualInfo *infos;
+	XRenderPictFormat *fmt;
+	int nitems;
+	int i;
+
+	XVisualInfo tpl = {
+		.screen = screen,
+		.depth = 32,
+		.class = TrueColor
+	};
+
+	long masks = VisualScreenMask | VisualDepthMask | VisualClassMask;
+
+	infos = XGetVisualInfo(dpy, masks, &tpl, &nitems);
+	visual = NULL;
+
+	for (i = 0; i < nitems; i++){
+		fmt = XRenderFindVisualFormat(dpy, infos[i].visual);
+		if (fmt->type == PictTypeDirect && fmt->direct.alphaMask) {
+			visual = infos[i].visual;
+			depth = infos[i].depth;
+			cmap = XCreateColormap(dpy, root, visual, AllocNone);
+			usergb = 1;
+			break;
+		}
+	}
+
+	XFree(infos);
+
+	if (! visual) {
+		visual = DefaultVisual(dpy, screen);
+		depth = DefaultDepth(dpy, screen);
+		cmap = DefaultColormap(dpy, screen);
+	}
+}
 
 static void
 appenditem(struct item *item, struct item **list, struct item **last)
@@ -210,9 +259,94 @@ grabkeyboard(void)
 	die("cannot grab keyboard");
 }
 
+int
+compare_distance(const void *a, const void *b)
+{
+	struct item *da = *(struct item **) a;
+	struct item *db = *(struct item **) b;
+
+	if (!db)
+		return 1;
+	if (!da)
+		return -1;
+
+	return da->distance == db->distance ? 0 : da->distance < db->distance ? -1 : 1;
+}
+
+void
+fuzzymatch(void)
+{
+	/* bang - we have so much memory */
+	struct item *it;
+	struct item **fuzzymatches = NULL;
+	char c;
+	int number_of_matches = 0, i, pidx, sidx, eidx;
+	int text_len = strlen(text), itext_len;
+
+	matches = matchend = NULL;
+
+	/* walk through all items */
+	for (it = items; it && it->text; it++) {
+		if (text_len) {
+			itext_len = strlen(it->text);
+			pidx = 0; /* pointer */
+			sidx = eidx = -1; /* start of match, end of match */
+			/* walk through item text */
+			for (i = 0; i < itext_len && (c = it->text[i]); i++) {
+				/* fuzzy match pattern */
+				if (!fstrncmp(&text[pidx], &c, 1)) {
+					if(sidx == -1)
+						sidx = i;
+					pidx++;
+					if (pidx == text_len) {
+						eidx = i;
+						break;
+					}
+				}
+			}
+			/* build list of matches */
+			if (eidx != -1) {
+				/* compute distance */
+				/* add penalty if match starts late (log(sidx+2))
+				 * add penalty for long a match without many matching characters */
+				it->distance = log(sidx + 2) + (double)(eidx - sidx - text_len);
+				/* fprintf(stderr, "distance %s %f\n", it->text, it->distance); */
+				appenditem(it, &matches, &matchend);
+				number_of_matches++;
+			}
+		} else {
+			appenditem(it, &matches, &matchend);
+		}
+	}
+
+	if (number_of_matches) {
+		/* initialize array with matches */
+		if (!(fuzzymatches = realloc(fuzzymatches, number_of_matches * sizeof(struct item*))))
+			die("cannot realloc %u bytes:", number_of_matches * sizeof(struct item*));
+		for (i = 0, it = matches; it && i < number_of_matches; i++, it = it->right) {
+			fuzzymatches[i] = it;
+		}
+		/* sort matches according to distance */
+		qsort(fuzzymatches, number_of_matches, sizeof(struct item*), compare_distance);
+		/* rebuild list of matches */
+		matches = matchend = NULL;
+		for (i = 0, it = fuzzymatches[i];  i < number_of_matches && it && \
+				it->text; i++, it = fuzzymatches[i]) {
+			appenditem(it, &matches, &matchend);
+		}
+		free(fuzzymatches);
+	}
+	curr = sel = matches;
+	calcoffsets();
+}
+
 static void
 match(void)
 {
+	if (fuzzy) {
+		fuzzymatch();
+		return;
+	}
 	static char **tokv = NULL;
 	static int tokn = 0;
 
@@ -501,6 +635,119 @@ draw:
 }
 
 static void
+buttonpress(XEvent *e)
+{
+	struct item *item;
+	XButtonPressedEvent *ev = &e->xbutton;
+	int x = 0, y = 0, h = bh, w;
+
+	if (ev->window != win)
+		return;
+
+	/* right-click: exit */
+	if (ev->button == Button3)
+		exit(1);
+
+	if (prompt && *prompt)
+		x += promptw;
+
+	/* input field */
+	w = (lines > 0 || !matches) ? mw - x : inputw;
+
+	/* left-click on input: clear input,
+	 * NOTE: if there is no left-arrow the space for < is reserved so
+	 *       add that to the input width */
+	if (ev->button == Button1 &&
+	   ((lines <= 0 && ev->x >= 0 && ev->x <= x + w +
+	   ((!prev || !curr->left) ? TEXTW("<") : 0)) ||
+	   (lines > 0 && ev->y >= y && ev->y <= y + h))) {
+		insert(NULL, -cursor);
+		drawmenu();
+		return;
+	}
+	/* middle-mouse click: paste selection */
+	if (ev->button == Button2) {
+		XConvertSelection(dpy, (ev->state & ShiftMask) ? clip : XA_PRIMARY,
+		                  utf8, utf8, win, CurrentTime);
+		drawmenu();
+		return;
+	}
+	/* scroll up */
+	if (ev->button == Button4 && prev) {
+		sel = curr = prev;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	/* scroll down */
+	if (ev->button == Button5 && next) {
+		sel = curr = next;
+		calcoffsets();
+		drawmenu();
+		return;
+	}
+	if (ev->button != Button1)
+		return;
+	if (ev->state & ~ControlMask)
+		return;
+	if (lines > 0) {
+		/* vertical list: (ctrl)left-click on item */
+		w = mw - x;
+		for (item = curr; item != next; item = item->right) {
+			y += h;
+			if (ev->y >= y && ev->y <= (y + h)) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+	} else if (matches) {
+		/* left-click on left arrow */
+		x += inputw;
+		w = TEXTW("<");
+		if (prev && curr->left) {
+			if (ev->x >= x && ev->x <= x + w) {
+				sel = curr = prev;
+				calcoffsets();
+				drawmenu();
+				return;
+			}
+		}
+		/* horizontal list: (ctrl)left-click on item */
+		for (item = curr; item != next; item = item->right) {
+			x += w;
+			w = MIN(TEXTW(item->text), mw - x - TEXTW(">"));
+			if (ev->x >= x && ev->x <= x + w) {
+				puts(item->text);
+				if (!(ev->state & ControlMask))
+					exit(0);
+				sel = item;
+				if (sel) {
+					sel->out = 1;
+					drawmenu();
+				}
+				return;
+			}
+		}
+		/* left-click on right arrow */
+		w = TEXTW(">");
+		x = mw - w;
+		if (next && ev->x >= x && ev->x <= x + w) {
+			sel = curr = next;
+			calcoffsets();
+			drawmenu();
+			return;
+		}
+	}
+}
+
+static void
 paste(void)
 {
 	char *p, *q;
@@ -561,6 +808,9 @@ run(void)
 				break;
 			cleanup();
 			exit(1);
+		case ButtonPress:
+			buttonpress(&ev);
+			break;
 		case Expose:
 			if (ev.xexpose.count == 0)
 				drw_map(drw, win, 0, 0, mw, mh);
@@ -602,7 +852,7 @@ setup(void)
 #endif
 	/* init appearance */
 	for (j = 0; j < SchemeLast; j++)
-		scheme[j] = drw_scm_create(drw, colors[j], 2);
+		scheme[j] = drw_scm_create(drw, colors[j], alphas[j], 2);
 
 	clip = XInternAtom(dpy, "CLIPBOARD",   False);
 	utf8 = XInternAtom(dpy, "UTF8_STRING", False);
@@ -658,10 +908,13 @@ setup(void)
 	/* create menu window */
 	swa.override_redirect = True;
 	swa.background_pixel = scheme[SchemeNorm][ColBg].pixel;
-	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask;
+	swa.border_pixel = 0;
+	swa.colormap = cmap;
+	swa.event_mask = ExposureMask | KeyPressMask | VisibilityChangeMask |
+	                 ButtonPressMask;
 	win = XCreateWindow(dpy, parentwin, x, y, mw, mh, 0,
-	                    CopyFromParent, CopyFromParent, CopyFromParent,
-	                    CWOverrideRedirect | CWBackPixel | CWEventMask, &swa);
+	                    depth, InputOutput, visual,
+	                    CWOverrideRedirect | CWBackPixel | CWColormap |  CWEventMask | CWBorderPixel, &swa);
 	XSetClassHint(dpy, win, &ch);
 
 
@@ -709,6 +962,8 @@ main(int argc, char *argv[])
 			topbar = 0;
 		else if (!strcmp(argv[i], "-f"))   /* grabs keyboard before reading stdin */
 			fast = 1;
+		else if (!strcmp(argv[i], "-F"))   /* grabs keyboard before reading stdin */
+			fuzzy = 0;
 		else if (!strcmp(argv[i], "-i")) { /* case-insensitive item matching */
 			fstrncmp = strncasecmp;
 			fstrstr = cistrstr;
@@ -747,7 +1002,8 @@ main(int argc, char *argv[])
 	if (!XGetWindowAttributes(dpy, parentwin, &wa))
 		die("could not get embedding window attributes: 0x%lx",
 		    parentwin);
-	drw = drw_create(dpy, screen, root, wa.width, wa.height);
+	xinitvisual();
+	drw = drw_create(dpy, screen, root, wa.width, wa.height, visual, depth, cmap);
 	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
 		die("no fonts could be loaded.");
 	lrpad = drw->fonts->h;
