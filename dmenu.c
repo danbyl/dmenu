@@ -34,6 +34,7 @@ enum { SchemeNorm, SchemeSel, SchemeOut, SchemeLast }; /* color schemes */
 
 struct item {
 	char *text;
+	char *aftersep;
 	struct item *left, *right;
 	int out;
 	double distance;
@@ -49,6 +50,7 @@ static struct item *items = NULL;
 static struct item *matches, *matchend;
 static struct item *prev, *curr, *next, *sel;
 static int mon = -1, screen;
+static char sep;
 
 static Atom clip, utf8;
 static Display *dpy;
@@ -598,7 +600,10 @@ insert:
 		break;
 	case XK_Return:
 	case XK_KP_Enter:
-		puts((sel && !(ev->state & ShiftMask)) ? sel->text : text);
+		if (sep)
+			puts((sel && !(ev->state & ShiftMask)) ? sel->aftersep : text);
+		else
+			puts((sel && !(ev->state & ShiftMask)) ? sel->text : text);
 		if (!(ev->state & ControlMask)) {
 			cleanup();
 			exit(0);
@@ -779,6 +784,13 @@ readstdin(void)
 				die("cannot realloc %u bytes:", size);
 		if ((p = strchr(buf, '\n')))
 			*p = '\0';
+		if (sep) {
+			if ((p = strchr(buf, sep))) {
+				*p = '\0';
+				if (!(items[i].aftersep = strdup(p + 1)))
+					die("cannot strdup %u bytes:", strlen(p + 1) + 1);
+			}
+		}
 		if (!(items[i].text = strdup(buf)))
 			die("cannot strdup %u bytes:", strlen(buf) + 1);
 		items[i].out = 0;
@@ -976,6 +988,8 @@ main(int argc, char *argv[])
 			mon = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "-p"))   /* adds prompt to left of input field */
 			prompt = argv[++i];
+		else if (!strcmp(argv[i], "-sep"))
+			sep = argv[++i][0];
 		else if (!strcmp(argv[i], "-fn"))  /* font or font set */
 			fonts[0] = argv[++i];
 		else if (!strcmp(argv[i], "-nb"))  /* normal background color */
