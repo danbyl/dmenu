@@ -1,7 +1,7 @@
 # Maintainer: Your Name <youremail@domain.com>
 pkgname=dmenu-custom
-_pkgname=dmenu
-pkgver=4.9.f1ed7ee
+_pkgname=dmenu-custom
+pkgver=4.9.fffc9d7
 pkgrel=1
 pkgdesc="My own build of dmenu, with fuzzy matching and mouse support"
 arch=('x86_64')
