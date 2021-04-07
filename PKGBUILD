@@ -1,7 +1,6 @@
 # Maintainer: Your Name <youremail@domain.com>
 pkgname=dmenu-custom
-_pkgname=dmenu-custom
-pkgver=4.9.fffc9d7
+pkgver=5.0.a55b2af
 pkgrel=1
 pkgdesc="My own build of dmenu, with fuzzy matching and mouse support"
 arch=('x86_64')
@@ -15,22 +14,23 @@ conflicts=('dmenu')
 replaces=('dmenu')
 install=
 changelog=
-source=('git+ssh://git@github.com/danbyl/dmenu.git')
-noextract=()
-md5sums=('SKIP')
+source=('arg.h' 'config.h' 'config.mk' 'dmenu.1' 'dmenu.c' 'drw.c' 'drw.h' 'LICENSE' 'Makefile' 'README' 'util.c' 'util.h' 'stest.c' 'stest.1' 'dmenu_path' 'dmenu_run')
+noextract=("${source[@]%%::*}")
+md5sums=("${source[@]/*/SKIP}")
 validpgpkeys=()
 
 pkgver() {
-	cd "$srcdir/$_pkgname"
 	printf "%s.%s" "$(awk '/^VERSION =/ {print $3}' config.mk)" "$(git rev-parse --short HEAD)"
 }
 
+check() {
+	git diff --exit-code -- ':/*' ':/!PKGBUILD'
+}
+
 build() {
-	cd "$_pkgname"
 	make
 }
 
 package() {
-	cd "$_pkgname"
 	make PREFIX="/usr" DESTDIR="$pkgdir" install
 }
