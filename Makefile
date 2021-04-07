@@ -29,7 +29,7 @@ stest: stest.o
 	$(CC) -o $@ stest.o $(LDFLAGS)
 
 clean:
-	rm -f dmenu stest $(OBJ) dmenu-custom-$(VERSION)*.tar.xz
+	rm -f dmenu stest $(OBJ) $(wildcard dmenu-custom-$(VERSION)*.tar.zst)
 
 dist: clean
 	mkdir -p dmenu-$(VERSION)
