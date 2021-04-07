@@ -538,6 +538,7 @@ keypress(XKeyEvent *ev)
 		case XK_Y:
 			XConvertSelection(dpy, (ev->state & ShiftMask) ? clip : XA_PRIMARY,
 			                  utf8, utf8, win, CurrentTime);
+			drawmenu();
 			return;
 		case XK_Left:
 			movewordedge(-1);
